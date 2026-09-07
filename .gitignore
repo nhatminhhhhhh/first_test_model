@@ -1,0 +1,14 @@
+# Python virtual environments
+venv/
+.venv/
+
+# Python cache files
+__pycache__/
+*.py[cod]
+
+# Training and experiment outputs
+runs/
+
+# Video files
+*.mp4
+*.avi
