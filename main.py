@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import os
-import threading
 import time
 from pathlib import Path
 
@@ -91,7 +90,8 @@ def letterbox(image: np.ndarray, imgsz: int) -> tuple[np.ndarray, float, tuple[i
     height, width = image.shape[:2]
     scale = min(imgsz / height, imgsz / width)
     new_width, new_height = int(round(width * scale)), int(round(height * scale))
-    resized = cv2.resize(image, (new_width, new_height), interpolation=cv2.INTER_LINEAR)
+    interpolation = cv2.INTER_AREA if scale < 1.0 else cv2.INTER_LINEAR
+    resized = cv2.resize(image, (new_width, new_height), interpolation=interpolation)
     pad_w = imgsz - new_width
     pad_h = imgsz - new_height
     left = pad_w // 2
@@ -173,6 +173,7 @@ class NcnnDetector:
         self.net = ncnn.Net()
         self.net.opt.num_threads = max(1, threads)
         self.net.opt.use_vulkan_compute = False
+        self.net.opt.lightmode = True
         self.net.opt.use_winograd_convolution = True
         self.net.opt.use_sgemm_convolution = True
         self.net.opt.use_packing_layout = True
@@ -222,35 +223,13 @@ class NcnnDetector:
         return detections
 
 
-class LatestFrame:
-    """Always keep the newest camera frame so inference is not serialized with capture."""
-
-    def __init__(self, camera: Picamera2) -> None:
-        self._camera = camera
-        self._frame: np.ndarray | None = None
-        self._lock = threading.Lock()
-        self._running = True
-        self._thread = threading.Thread(target=self._loop, daemon=True)
-        self._thread.start()
-
-    def _loop(self) -> None:
-        while self._running:
-            frame = self._camera.capture_array()
-            with self._lock:
-                self._frame = frame
-
-    def get(self) -> np.ndarray:
-        while self._running:
-            with self._lock:
-                frame = self._frame
-            if frame is not None:
-                return frame.copy()
-            time.sleep(0.001)
-        raise RuntimeError("Camera capture thread has stopped")
-
-    def stop(self) -> None:
-        self._running = False
-        self._thread.join(timeout=1.0)
+def grab_frame(camera: Picamera2) -> np.ndarray:
+    """Take one camera frame. Avoid a capture thread: it contends for Pi 4 RAM bandwidth."""
+    request = camera.capture_request()
+    try:
+        return request.make_array("main").copy()
+    finally:
+        request.release()
 
 
 def draw_detections(
@@ -325,6 +304,8 @@ def main() -> None:
     parser.add_argument("--save", action="store_true", help="Write annotated video (slow on Pi 4)")
     parser.add_argument("--no-display", action="store_true")
     parser.add_argument("--warmup", type=int, default=5)
+    parser.add_argument("--bench", type=int, default=0, help="Run N frames, print average, then exit")
+    parser.add_argument("--log-every", type=int, default=10, help="Print FPS/infer to the terminal every N frames")
     args = parser.parse_args()
 
     cv2.setNumThreads(1)
@@ -383,52 +364,77 @@ def main() -> None:
             camera.stop()
             raise RuntimeError(f"Unable to open output video: {output_path}")
 
-    latest = LatestFrame(camera)
-    dummy = latest.get()
+    dummy = grab_frame(camera)
     for _ in range(max(0, args.warmup)):
         detector.predict(dummy)
 
     confirmation_boxes: list[dict[str, object]] = []
     previous_time = time.monotonic()
+    infer_total_ms = 0.0
+    frame_count = 0
     print(
-        "Running native NCNN. Tips: --no-display, avoid --save, "
-        "and re-export with `yolo export format=ncnn imgsz=320 int8=True` for more FPS."
+        f"Native NCNN imgsz={imgsz} threads={args.threads}. "
+        "FP32 416 on Pi 4 is typically ~180-200ms (~5 FPS). "
+        "Faster needs a new export: `yolo export model=model.pt format=ncnn imgsz=320 int8=True`. "
+        "Ctrl+C to stop."
     )
     try:
         while True:
-            image = latest.get()
+            image = grab_frame(camera)
             infer_started = time.monotonic()
             detections = detector.predict(image)
             infer_ms = (time.monotonic() - infer_started) * 1000.0
             timestamp = time.monotonic()
-            frame = draw_detections(
-                image,
-                detections,
-                detector.names,
-                confirmation_boxes,
-                timestamp,
-            )
+            if args.no_display and writer is None:
+                frame = image
+            else:
+                frame = draw_detections(
+                    image,
+                    detections,
+                    detector.names,
+                    confirmation_boxes,
+                    timestamp,
+                )
             current_time = time.monotonic()
             elapsed = current_time - previous_time
             previous_time = current_time
             actual_fps = 1.0 / elapsed if elapsed > 0 else 0.0
-            cv2.putText(
-                frame,
-                f"FPS: {actual_fps:.1f}  infer: {infer_ms:.0f}ms",
-                (10, 30),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.8,
-                (0, 255, 0),
-                2,
-            )
+            infer_total_ms += infer_ms
+            frame_count += 1
+            if args.log_every > 0 and frame_count % args.log_every == 0:
+                avg_infer = infer_total_ms / frame_count
+                print(
+                    f"[{frame_count}] fps={actual_fps:.1f}  infer={infer_ms:.0f}ms  "
+                    f"avg_infer={avg_infer:.0f}ms  dets={len(detections)}",
+                    flush=True,
+                )
+            if not args.no_display:
+                cv2.putText(
+                    frame,
+                    f"FPS: {actual_fps:.1f}  infer: {infer_ms:.0f}ms",
+                    (10, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.8,
+                    (0, 255, 0),
+                    2,
+                )
             if writer is not None:
                 writer.write(frame)
             if not args.no_display:
                 cv2.imshow("OV5647 drowning detection", frame)
                 if cv2.waitKey(1) & 0xFF == ord("q"):
                     break
+            if args.bench > 0 and frame_count >= args.bench:
+                break
+    except KeyboardInterrupt:
+        print("Stopped.", flush=True)
     finally:
-        latest.stop()
+        if frame_count:
+            print(
+                f"Average infer {infer_total_ms / frame_count:.0f}ms "
+                f"over {frame_count} frames ({1000.0 * frame_count / infer_total_ms:.1f} infer FPS).",
+                flush=True,
+            )
         if writer is not None:
             writer.release()
         camera.stop()
