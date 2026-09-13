@@ -9,7 +9,7 @@ import time
 from pathlib import Path
 
 # Two threads by default: 4-core 100% load overheats / brownouts a Pi 4 in ~2 minutes.
-os.environ.setdefault("OMP_NUM_THREADS", "2")
+os.environ.setdefault("OMP_NUM_THREADS", "4")
 os.environ.setdefault("OPENCV_VIDEOIO_PRIORITY_MSMF", "0")
 
 import cv2
@@ -376,19 +376,19 @@ def main() -> None:
     parser.add_argument(
         "--threads",
         type=int,
-        default=1,
+        default=4,
         help="NCNN threads. 1 draws less current on a weak Pi 4 PSU",
     )
     parser.add_argument(
         "--max-fps",
         type=float,
-        default=4.0,
+        default=10.0,
         help="Cap loop rate so the CPU can idle. 0 disables the cap",
     )
     parser.add_argument(
         "--thermal-limit",
         type=float,
-        default=55.0,
+        default=58.0,
         help="Start extra idle above this SoC temp. Pi dying near 63C is PSU sag, not thermal shutdown",
     )
     parser.add_argument("--output", default="runs/detect/ov5647.avi")
@@ -399,7 +399,7 @@ def main() -> None:
     parser.add_argument("--log-every", type=int, default=10, help="Print FPS/infer to the terminal every N frames")
     args = parser.parse_args()
 
-    cv2.setNumThreads(1)
+    cv2.setNumThreads(2) # 2 is the default for OpenCV
 
     model_path = Path(args.model)
     if not model_path.is_absolute():
