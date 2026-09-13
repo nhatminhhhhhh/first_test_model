@@ -100,8 +100,8 @@ def pi_status_text() -> str:
         parts.append(f"throttled=0x{value:x}")
         if flags:
             parts.append(", ".join(flags))
-        elif value == 0:
-            parts.append("no throttle flags (likely PSU cut, not SoC thermal)")
+        else:
+            parts.append("ok")
     return "  ".join(parts) if parts else "no Pi thermal/throttle sysfs"
 
 
@@ -467,8 +467,7 @@ def main() -> None:
     os.environ["OMP_NUM_THREADS"] = str(args.threads)
     print(
         f"Native NCNN imgsz={imgsz} threads={args.threads} max-fps={args.max_fps}. "
-        f"{pi_status_text()}. "
-        "Pi firmware does not power off at 63C; that cutoff is almost always the PSU. Ctrl+C to stop.",
+        f"{pi_status_text()}. Ctrl+C to stop.",
         flush=True,
     )
     try:
