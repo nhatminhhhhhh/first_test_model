@@ -1,3 +1,4 @@
 ultralytics>=8.4,<9
+ncnn>=1.0
 opencv-python>=4.8,<6
 jupyter>=1.0,<2

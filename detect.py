@@ -92,6 +92,7 @@ def main() -> None:
     parser.add_argument("--source", required=True, help="Image/video path, URL, or webcam index (0)")
     parser.add_argument("--model", default="model.pt", help="Path to the YOLO weights file")
     parser.add_argument("--conf", type=float, default=0.2, help="Detection confidence threshold")
+    parser.add_argument("--imgsz", type=int, default=416, help="Inference image size")
     parser.add_argument("--output", default="runs/detect", help="Output directory")
     parser.add_argument("--camera-width", type=int, default=640, help="Webcam capture width")
     parser.add_argument("--camera-height", type=int, default=480, help="Webcam capture height")
@@ -101,10 +102,12 @@ def main() -> None:
     model_path = Path(args.model)
     if not model_path.is_absolute():
         model_path = REPO_DIR / model_path
-    if not model_path.is_file():
-        raise FileNotFoundError(f"Model file not found: {model_path}")
+    if not model_path.is_file() and not model_path.is_dir():
+        raise FileNotFoundError(f"Model file or directory not found: {model_path}")
     if not 0 <= args.conf <= 1:
         raise ValueError("--conf must be between 0 and 1")
+    if args.imgsz <= 0:
+        raise ValueError("--imgsz must be greater than 0")
 
     output_dir = Path(args.output)
     if not output_dir.is_absolute():
@@ -145,7 +148,12 @@ def main() -> None:
                 if not success:
                     raise RuntimeError("Unable to read a frame from the webcam")
 
-                result = model.predict(source=image, conf=args.conf, verbose=False)[0]
+                result = model.predict(
+                    source=image,
+                    conf=args.conf,
+                    imgsz=args.imgsz,
+                    verbose=False,
+                )[0]
                 current_time = time.monotonic()
                 frame = draw_detections(result, confirmation_boxes, current_time)
                 writer.write(frame)
@@ -163,7 +171,13 @@ def main() -> None:
             cv2.destroyAllWindows()
         return
 
-    results = model.predict(source=source, conf=args.conf, stream=True, verbose=False)
+    results = model.predict(
+        source=source,
+        conf=args.conf,
+        imgsz=args.imgsz,
+        stream=True,
+        verbose=False,
+    )
 
     first_result = next(results)
     source_path = Path(args.source) if isinstance(source, str) else None
