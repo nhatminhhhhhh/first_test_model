@@ -43,26 +43,44 @@ THROTTLE_BITS = {
 }
 
 
-def read_cpu_temp_c() -> float | None:
-    try:
-        return int(THERMAL_PATH.read_text().strip()) / 1000.0
-    except OSError:
-        return None
-
-
-def read_throttle_flags() -> tuple[int | None, list[str]]:
+def read_vcgencmd(*args: str) -> str | None:
     try:
         result = subprocess.run(
-            ["vcgencmd", "get_throttled"],
+            ["vcgencmd", *args],
             capture_output=True,
             text=True,
             timeout=0.5,
             check=False,
         )
     except (OSError, subprocess.TimeoutExpired):
-        return None, []
-    raw = result.stdout.strip()
-    if "throttled=" not in raw:
+        return None
+    text = result.stdout.strip()
+    return text or None
+
+
+def read_cpu_temp_c() -> float | None:
+    measured = read_vcgencmd("measure_temp")
+    if measured and "temp=" in measured:
+        try:
+            return float(measured.split("=", 1)[1].rstrip("'C"))
+        except ValueError:
+            pass
+    try:
+        return int(THERMAL_PATH.read_text().strip()) / 1000.0
+    except OSError:
+        return None
+
+
+def read_core_volts() -> str | None:
+    measured = read_vcgencmd("measure_volts", "core")
+    if not measured:
+        return None
+    return measured.replace("volt=", "core=")
+
+
+def read_throttle_flags() -> tuple[int | None, list[str]]:
+    raw = read_vcgencmd("get_throttled")
+    if not raw or "throttled=" not in raw:
         return None, []
     value = int(raw.split("=", 1)[1], 16)
     flags = [name for bit, name in THROTTLE_BITS.items() if value & (1 << bit)]
@@ -72,13 +90,18 @@ def read_throttle_flags() -> tuple[int | None, list[str]]:
 def pi_status_text() -> str:
     temp = read_cpu_temp_c()
     value, flags = read_throttle_flags()
+    volts = read_core_volts()
     parts: list[str] = []
     if temp is not None:
         parts.append(f"temp={temp:.1f}C")
+    if volts:
+        parts.append(volts)
     if value is not None:
         parts.append(f"throttled=0x{value:x}")
         if flags:
             parts.append(", ".join(flags))
+        elif value == 0:
+            parts.append("no throttle flags (likely PSU cut, not SoC thermal)")
     return "  ".join(parts) if parts else "no Pi thermal/throttle sysfs"
 
 
@@ -353,20 +376,20 @@ def main() -> None:
     parser.add_argument(
         "--threads",
         type=int,
-        default=2,
-        help="NCNN threads. Use 2 on Pi 4 to limit heat and current; 4 often brownouts",
+        default=1,
+        help="NCNN threads. 1 draws less current on a weak Pi 4 PSU",
     )
     parser.add_argument(
         "--max-fps",
         type=float,
-        default=10.0,
-        help="Cap loop rate so the CPU can idle. 0 disables the cap. 5 FPS is enough for 2s drowning confirmation",
+        default=4.0,
+        help="Cap loop rate so the CPU can idle. 0 disables the cap",
     )
     parser.add_argument(
         "--thermal-limit",
         type=float,
-        default=75.0,
-        help="If SoC temp exceeds this, extra sleep is added. 0 disables",
+        default=55.0,
+        help="Start extra idle above this SoC temp. Pi dying near 63C is PSU sag, not thermal shutdown",
     )
     parser.add_argument("--output", default="runs/detect/ov5647.avi")
     parser.add_argument("--save", action="store_true", help="Write annotated video (slow on Pi 4)")
@@ -413,7 +436,7 @@ def main() -> None:
     camera = Picamera2()
     camera.configure(
         camera.create_preview_configuration(
-            main={"size": (args.width, args.height), "format": "BGR888"},
+            main={"size": (args.width, args.height), "format": "RGB888"},
             buffer_count=4,
         )
     )
@@ -440,10 +463,12 @@ def main() -> None:
     previous_time = time.monotonic()
     infer_total_ms = 0.0
     frame_count = 0
+    last_backoff_log = 0.0
     os.environ["OMP_NUM_THREADS"] = str(args.threads)
     print(
         f"Native NCNN imgsz={imgsz} threads={args.threads} max-fps={args.max_fps}. "
-        f"{pi_status_text()}. Ctrl+C to stop.",
+        f"{pi_status_text()}. "
+        "Pi firmware does not power off at 63C; that cutoff is almost always the PSU. Ctrl+C to stop.",
         flush=True,
     )
     try:
@@ -500,12 +525,21 @@ def main() -> None:
                 if args.max_fps > 0:
                     remaining = (1.0 / args.max_fps) - (time.monotonic() - loop_started)
                 temp = read_cpu_temp_c()
-                if (
-                    args.thermal_limit > 0
-                    and temp is not None
-                    and temp >= args.thermal_limit
-                ):
-                    remaining = max(remaining, 0.15 + (temp - args.thermal_limit) * 0.02)
+                if args.thermal_limit > 0 and temp is not None:
+                    if temp >= args.thermal_limit:
+                        remaining = max(remaining, 0.4 + (temp - args.thermal_limit) * 0.08)
+                    if temp >= 58.0:
+                        remaining = max(remaining, 1.5)
+                    if temp >= 61.0:
+                        remaining = max(remaining, 3.0)
+                        now = time.monotonic()
+                        if now - last_backoff_log >= 5.0:
+                            last_backoff_log = now
+                            print(
+                                f"Load backoff at {temp:.1f}C to avoid PSU cutoff. "
+                                f"{pi_status_text()}",
+                                flush=True,
+                            )
                 if remaining > 0:
                     time.sleep(remaining)
     except KeyboardInterrupt:
