@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import argparse
 import os
+import subprocess
 import time
 from pathlib import Path
 
-# Keep OpenCV from competing with NCNN for the four Cortex-A72 cores.
-os.environ.setdefault("OMP_NUM_THREADS", "4")
+# Two threads by default: 4-core 100% load overheats / brownouts a Pi 4 in ~2 minutes.
+os.environ.setdefault("OMP_NUM_THREADS", "2")
 os.environ.setdefault("OPENCV_VIDEOIO_PRIORITY_MSMF", "0")
 
 import cv2
@@ -29,6 +30,56 @@ CONFIRMATION_WINDOW_SECONDS = 2.0
 MATCH_IOU_THRESHOLD = 0.5
 NCNN_MEAN = [0.0, 0.0, 0.0]
 NCNN_NORM = [1 / 255.0, 1 / 255.0, 1 / 255.0]
+THERMAL_PATH = Path("/sys/class/thermal/thermal_zone0/temp")
+THROTTLE_BITS = {
+    0: "under-voltage now",
+    1: "ARM freq capped now",
+    2: "throttled now",
+    3: "soft temp limit now",
+    16: "under-voltage occurred",
+    17: "ARM freq capped occurred",
+    18: "throttled occurred",
+    19: "soft temp limit occurred",
+}
+
+
+def read_cpu_temp_c() -> float | None:
+    try:
+        return int(THERMAL_PATH.read_text().strip()) / 1000.0
+    except OSError:
+        return None
+
+
+def read_throttle_flags() -> tuple[int | None, list[str]]:
+    try:
+        result = subprocess.run(
+            ["vcgencmd", "get_throttled"],
+            capture_output=True,
+            text=True,
+            timeout=0.5,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None, []
+    raw = result.stdout.strip()
+    if "throttled=" not in raw:
+        return None, []
+    value = int(raw.split("=", 1)[1], 16)
+    flags = [name for bit, name in THROTTLE_BITS.items() if value & (1 << bit)]
+    return value, flags
+
+
+def pi_status_text() -> str:
+    temp = read_cpu_temp_c()
+    value, flags = read_throttle_flags()
+    parts: list[str] = []
+    if temp is not None:
+        parts.append(f"temp={temp:.1f}C")
+    if value is not None:
+        parts.append(f"throttled=0x{value:x}")
+        if flags:
+            parts.append(", ".join(flags))
+    return "  ".join(parts) if parts else "no Pi thermal/throttle sysfs"
 
 
 def load_class_names(model_dir: Path) -> dict[int, str]:
@@ -299,7 +350,24 @@ def main() -> None:
     parser.add_argument("--width", type=int, default=640)
     parser.add_argument("--height", type=int, default=480)
     parser.add_argument("--fps", type=float, default=15)
-    parser.add_argument("--threads", type=int, default=4)
+    parser.add_argument(
+        "--threads",
+        type=int,
+        default=2,
+        help="NCNN threads. Use 2 on Pi 4 to limit heat and current; 4 often brownouts",
+    )
+    parser.add_argument(
+        "--max-fps",
+        type=float,
+        default=10.0,
+        help="Cap loop rate so the CPU can idle. 0 disables the cap. 5 FPS is enough for 2s drowning confirmation",
+    )
+    parser.add_argument(
+        "--thermal-limit",
+        type=float,
+        default=75.0,
+        help="If SoC temp exceeds this, extra sleep is added. 0 disables",
+    )
     parser.add_argument("--output", default="runs/detect/ov5647.avi")
     parser.add_argument("--save", action="store_true", help="Write annotated video (slow on Pi 4)")
     parser.add_argument("--no-display", action="store_true")
@@ -372,14 +440,15 @@ def main() -> None:
     previous_time = time.monotonic()
     infer_total_ms = 0.0
     frame_count = 0
+    os.environ["OMP_NUM_THREADS"] = str(args.threads)
     print(
-        f"Native NCNN imgsz={imgsz} threads={args.threads}. "
-        "FP32 416 on Pi 4 is typically ~180-200ms (~5 FPS). "
-        "Faster needs a new export: `yolo export model=model.pt format=ncnn imgsz=320 int8=True`. "
-        "Ctrl+C to stop."
+        f"Native NCNN imgsz={imgsz} threads={args.threads} max-fps={args.max_fps}. "
+        f"{pi_status_text()}. Ctrl+C to stop.",
+        flush=True,
     )
     try:
         while True:
+            loop_started = time.monotonic()
             image = grab_frame(camera)
             infer_started = time.monotonic()
             detections = detector.predict(image)
@@ -405,7 +474,7 @@ def main() -> None:
                 avg_infer = infer_total_ms / frame_count
                 print(
                     f"[{frame_count}] fps={actual_fps:.1f}  infer={infer_ms:.0f}ms  "
-                    f"avg_infer={avg_infer:.0f}ms  dets={len(detections)}",
+                    f"avg_infer={avg_infer:.0f}ms  dets={len(detections)}  {pi_status_text()}",
                     flush=True,
                 )
             if not args.no_display:
@@ -426,6 +495,19 @@ def main() -> None:
                     break
             if args.bench > 0 and frame_count >= args.bench:
                 break
+            if args.bench <= 0:
+                remaining = 0.0
+                if args.max_fps > 0:
+                    remaining = (1.0 / args.max_fps) - (time.monotonic() - loop_started)
+                temp = read_cpu_temp_c()
+                if (
+                    args.thermal_limit > 0
+                    and temp is not None
+                    and temp >= args.thermal_limit
+                ):
+                    remaining = max(remaining, 0.15 + (temp - args.thermal_limit) * 0.02)
+                if remaining > 0:
+                    time.sleep(remaining)
     except KeyboardInterrupt:
         print("Stopped.", flush=True)
     finally:
