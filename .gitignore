@@ -9,6 +9,12 @@ __pycache__/
 # Training and experiment outputs
 runs/
 
+# Downloaded training dataset
+dataset/
+
 # Video files
 *.mp4
 *.avi
+scripts/
+runs/compare/
+runs/test_current/
