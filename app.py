@@ -15,6 +15,7 @@ import sys
 import threading
 import time
 import tkinter as tk
+import tkinter.font as tkfont
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
@@ -40,6 +41,16 @@ BOX_COLORS = [
     (255, 0, 255),
     (0, 255, 255),
 ]
+
+# UI palette
+PAD = 10
+COLOR_BG = "#1e2530"
+COLOR_PANEL = "#262e3d"
+COLOR_ACCENT = "#3aa0ff"
+COLOR_OK = "#33cc77"
+COLOR_WARN = "#ff5555"
+COLOR_TEXT = "#e8ecf1"
+COLOR_MUTED = "#8b95a5"
 
 
 # --------------------------------------------------------------------------
@@ -221,6 +232,15 @@ def draw_detections(frame: np.ndarray, detections: list[tuple[np.ndarray, float,
     return frame
 
 
+def draw_hud(frame: np.ndarray, fps: float, infer_ms: float, count: int) -> np.ndarray:
+    """Overlay FPS / inference time / detection count in the top-left corner."""
+    text = f"FPS {fps:4.1f}   infer {infer_ms:5.0f} ms   det {count}"
+    (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.65, 2)
+    cv2.rectangle(frame, (6, 6), (6 + tw + 16, 6 + th + 16), (20, 20, 20), -1)
+    cv2.putText(frame, text, (14, 14 + th), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (60, 220, 60), 2)
+    return frame
+
+
 # --------------------------------------------------------------------------
 # Camera discovery + uniform capture wrappers
 # --------------------------------------------------------------------------
@@ -296,43 +316,108 @@ class App(tk.Tk):
     def __init__(self, args: argparse.Namespace) -> None:
         super().__init__()
         self.title("Drowning Detection")
-        self.geometry("1000x700")
+        self.geometry("1150x760")
+        self.minsize(900, 600)
+        self.configure(bg=COLOR_BG)
 
         self.args = args
         self.detector: NcnnDetector | None = None
         self.camera = None
         self.camera_running = False
         self.video_queue: queue.Queue = queue.Queue()
+        self._video_path: Path | None = None
+        self._result_path: Path | None = None
+        self._prev_frame_time = 0.0
 
+        self._setup_style()
+        self._build_header()
         self._build_model_bar()
         self._build_tabs()
+        self._build_status_bar()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
-    # -- shared controls -------------------------------------------------
+    # -- look & feel -------------------------------------------------------
+
+    def _setup_style(self) -> None:
+        for name in ("TkDefaultFont", "TkTextFont", "TkHeadingFont", "TkMenuFont"):
+            try:
+                tkfont.nametofont(name).configure(size=10)
+            except tk.TclError:
+                pass
+
+        style = ttk.Style(self)
+        try:
+            style.theme_use("clam")
+        except tk.TclError:
+            pass
+
+        style.configure(".", background=COLOR_PANEL, foreground=COLOR_TEXT, font=("TkDefaultFont", 10))
+        style.configure("TFrame", background=COLOR_PANEL)
+        style.configure("Header.TFrame", background=COLOR_BG)
+        style.configure("TLabelframe", background=COLOR_PANEL, foreground=COLOR_TEXT, bordercolor="#3a4457")
+        style.configure("TLabelframe.Label", background=COLOR_PANEL, foreground=COLOR_MUTED, font=("TkDefaultFont", 9, "bold"))
+        style.configure("TLabel", background=COLOR_PANEL, foreground=COLOR_TEXT)
+        style.configure("Header.TLabel", background=COLOR_BG, foreground=COLOR_TEXT, font=("TkDefaultFont", 16, "bold"))
+        style.configure("Sub.TLabel", background=COLOR_BG, foreground=COLOR_MUTED, font=("TkDefaultFont", 9))
+        style.configure("Status.TLabel", background="#141a24", foreground=COLOR_MUTED, font=("TkDefaultFont", 9))
+        style.configure("Muted.TLabel", foreground=COLOR_MUTED)
+        style.configure("TNotebook", background=COLOR_BG, borderwidth=0)
+        style.configure("TNotebook.Tab", padding=(16, 8), font=("TkDefaultFont", 10, "bold"))
+        style.map("TNotebook.Tab", background=[("selected", COLOR_PANEL)], foreground=[("selected", COLOR_TEXT)])
+        style.configure("TRadiobutton", background=COLOR_PANEL, foreground=COLOR_TEXT)
+        style.configure("TEntry", fieldbackground="#141a24", foreground=COLOR_TEXT, insertcolor=COLOR_TEXT)
+        style.configure("TCombobox", fieldbackground="#141a24", foreground=COLOR_TEXT)
+
+        style.configure("TButton", padding=(10, 6), background="#3a4457", foreground=COLOR_TEXT, borderwidth=0)
+        style.map("TButton", background=[("active", "#465370"), ("disabled", "#2c3444")])
+        style.configure("Start.TButton", background=COLOR_OK, foreground="#0c1710")
+        style.map("Start.TButton", background=[("active", "#3fe08a"), ("disabled", "#2c3444")])
+        style.configure("Stop.TButton", background=COLOR_WARN, foreground="#1a0505")
+        style.map("Stop.TButton", background=[("active", "#ff7777"), ("disabled", "#2c3444")])
+        style.configure("Accent.TButton", background=COLOR_ACCENT, foreground="#04121f")
+        style.map("Accent.TButton", background=[("active", "#5fb4ff"), ("disabled", "#2c3444")])
+        style.configure("Horizontal.TProgressbar", background=COLOR_ACCENT, troughcolor="#141a24", bordercolor="#141a24")
+
+    def _build_header(self) -> None:
+        header = ttk.Frame(self, style="Header.TFrame")
+        header.pack(fill="x", padx=0, pady=0)
+        inner = ttk.Frame(header, style="Header.TFrame")
+        inner.pack(fill="x", padx=PAD * 2, pady=(PAD, 4))
+        ttk.Label(inner, text="Drowning Detection", style="Header.TLabel").pack(anchor="w")
+        ttk.Label(
+            inner, text="Nhan dien duoi nuoc / boi / ngoai nuoc bang model NCNN", style="Sub.TLabel"
+        ).pack(anchor="w")
+
+    # -- shared controls -----------------------------------------------------
 
     def _build_model_bar(self) -> None:
-        bar = ttk.Frame(self)
-        bar.pack(fill="x", padx=8, pady=6)
+        bar = ttk.LabelFrame(self, text="Cau hinh model")
+        bar.pack(fill="x", padx=PAD * 2, pady=(6, 4))
+        for col in range(8):
+            bar.columnconfigure(col, weight=0)
 
-        ttk.Label(bar, text="Model:").pack(side="left")
         models = sorted(
             p.name for p in MODEL_ROOT.iterdir() if p.is_dir() and (p / "model.ncnn.param").is_file()
         ) if MODEL_ROOT.is_dir() else []
         default_model = self.args.model if self.args.model in models else (models[0] if models else "")
+
+        ttk.Label(bar, text="Model").grid(row=0, column=0, padx=(10, 4), pady=8, sticky="w")
         self.model_var = tk.StringVar(value=default_model)
-        ttk.Combobox(bar, textvariable=self.model_var, values=models, width=28, state="readonly").pack(side="left", padx=4)
+        ttk.Combobox(bar, textvariable=self.model_var, values=models, width=24, state="readonly").grid(
+            row=0, column=1, padx=4, pady=8
+        )
 
-        ttk.Label(bar, text="Conf:").pack(side="left", padx=(12, 0))
+        ttk.Label(bar, text="Conf").grid(row=0, column=2, padx=(16, 4), pady=8, sticky="w")
         self.conf_var = tk.StringVar(value=str(self.args.conf))
-        ttk.Entry(bar, textvariable=self.conf_var, width=6).pack(side="left", padx=4)
+        ttk.Entry(bar, textvariable=self.conf_var, width=6).grid(row=0, column=3, padx=4, pady=8)
 
-        ttk.Label(bar, text="IoU:").pack(side="left", padx=(12, 0))
+        ttk.Label(bar, text="IoU").grid(row=0, column=4, padx=(16, 4), pady=8, sticky="w")
         self.iou_var = tk.StringVar(value=str(self.args.iou))
-        ttk.Entry(bar, textvariable=self.iou_var, width=6).pack(side="left", padx=4)
+        ttk.Entry(bar, textvariable=self.iou_var, width=6).grid(row=0, column=5, padx=4, pady=8)
 
-        ttk.Label(bar, text="Threads:").pack(side="left", padx=(12, 0))
+        ttk.Label(bar, text="Threads").grid(row=0, column=6, padx=(16, 4), pady=8, sticky="w")
         self.threads_var = tk.StringVar(value=str(self.args.threads))
-        ttk.Entry(bar, textvariable=self.threads_var, width=4).pack(side="left", padx=4)
+        ttk.Entry(bar, textvariable=self.threads_var, width=4).grid(row=0, column=7, padx=4, pady=8)
 
     def _get_detector(self) -> NcnnDetector:
         model_name = self.model_var.get()
@@ -347,38 +432,62 @@ class App(tk.Tk):
 
     def _build_tabs(self) -> None:
         notebook = ttk.Notebook(self)
-        notebook.pack(fill="both", expand=True, padx=8, pady=8)
+        notebook.pack(fill="both", expand=True, padx=PAD * 2, pady=(4, 4))
 
         self.camera_tab = ttk.Frame(notebook)
         self.video_tab = ttk.Frame(notebook)
-        notebook.add(self.camera_tab, text="Camera")
-        notebook.add(self.video_tab, text="Test video")
+        notebook.add(self.camera_tab, text="  Camera  ")
+        notebook.add(self.video_tab, text="  Test video  ")
 
         self._build_camera_tab()
         self._build_video_tab()
 
-    # -- camera tab --------------------------------------------------------
+    def _build_status_bar(self) -> None:
+        bar = ttk.Frame(self, style="TFrame")
+        bar.configure(style="TFrame")
+        status = tk.Frame(self, bg="#141a24", height=28)
+        status.pack(fill="x", side="bottom")
+        self.status_var = tk.StringVar(value="San sang.")
+        tk.Label(
+            status, textvariable=self.status_var, bg="#141a24", fg=COLOR_MUTED,
+            font=("TkDefaultFont", 9), anchor="w",
+        ).pack(fill="x", padx=PAD * 2, pady=4)
+
+    # -- camera tab ----------------------------------------------------------
 
     def _build_camera_tab(self) -> None:
-        controls = ttk.Frame(self.camera_tab)
-        controls.pack(fill="x", pady=4)
+        self.camera_tab.columnconfigure(0, weight=0, minsize=260)
+        self.camera_tab.columnconfigure(1, weight=1)
+        self.camera_tab.rowconfigure(0, weight=1)
 
-        ttk.Button(controls, text="Quet camera", command=self._refresh_cameras).pack(side="left")
-        self.start_btn = ttk.Button(controls, text="Bat dau", command=self._start_camera)
-        self.start_btn.pack(side="left", padx=6)
-        self.stop_btn = ttk.Button(controls, text="Dung", command=self._stop_camera, state="disabled")
-        self.stop_btn.pack(side="left")
+        # left sidebar: camera list + controls
+        sidebar = ttk.Frame(self.camera_tab)
+        sidebar.grid(row=0, column=0, sticky="nsw", padx=(0, PAD), pady=PAD)
 
-        self.camera_list_frame = ttk.LabelFrame(self.camera_tab, text="Camera phat hien (chi chon duoc 1)")
-        self.camera_list_frame.pack(fill="x", pady=6)
+        self.camera_list_frame = ttk.LabelFrame(sidebar, text="Camera phat hien (chon 1)")
+        self.camera_list_frame.pack(fill="x", pady=(0, 10))
         self.camera_var = tk.StringVar(value="")
         self.camera_radios: list[ttk.Radiobutton] = []
 
-        self.camera_view = ttk.Label(self.camera_tab)
-        self.camera_view.pack(fill="both", expand=True, pady=4)
+        ttk.Button(sidebar, text="Quet lai camera", command=self._refresh_cameras).pack(fill="x", pady=(0, 6))
+        self.start_btn = ttk.Button(sidebar, text="Bat dau", style="Start.TButton", command=self._start_camera)
+        self.start_btn.pack(fill="x", pady=(0, 6))
+        self.stop_btn = ttk.Button(sidebar, text="Dung", style="Stop.TButton", command=self._stop_camera, state="disabled")
+        self.stop_btn.pack(fill="x")
 
-        self.camera_status = ttk.Label(self.camera_tab, text="Chua chon camera.")
-        self.camera_status.pack(fill="x")
+        # main: live preview
+        main = ttk.Frame(self.camera_tab)
+        main.grid(row=0, column=1, sticky="nsew", pady=PAD)
+        main.rowconfigure(0, weight=1)
+        main.columnconfigure(0, weight=1)
+
+        preview_holder = tk.Frame(main, bg="#0b0f16")
+        preview_holder.grid(row=0, column=0, sticky="nsew")
+        self.camera_view = tk.Label(preview_holder, bg="#0b0f16", text="Chua bat dau camera", fg=COLOR_MUTED)
+        self.camera_view.pack(expand=True)
+
+        self.camera_status = ttk.Label(main, text="Chua chon camera.", style="Muted.TLabel")
+        self.camera_status.grid(row=1, column=0, sticky="w", pady=(8, 0))
 
         self._refresh_cameras()
 
@@ -397,12 +506,14 @@ class App(tk.Tk):
             entries.append((f"usb:{index}", f"USB webcam #{index}"))
 
         if not entries:
-            ttk.Label(self.camera_list_frame, text="Khong phat hien camera nao.").pack(anchor="w")
+            ttk.Label(self.camera_list_frame, text="Khong phat hien camera nao.", style="Muted.TLabel").pack(
+                anchor="w", padx=8, pady=6
+            )
             return
 
         for key, label in entries:
             radio = ttk.Radiobutton(self.camera_list_frame, text=label, value=key, variable=self.camera_var)
-            radio.pack(anchor="w")
+            radio.pack(anchor="w", padx=8, pady=3)
             self.camera_radios.append(radio)
         if not self.camera_var.get():
             self.camera_var.set(entries[0][0])
@@ -431,25 +542,35 @@ class App(tk.Tk):
             return
 
         self.camera_running = True
+        self._prev_frame_time = time.monotonic()
         self.start_btn.state(["disabled"])
         self.stop_btn.state(["!disabled"])
         for radio in self.camera_radios:
             radio.state(["disabled"])
         self.camera_status.configure(text=f"Dang chay: {selection}")
+        self.status_var.set(f"Camera dang chay | model={self.model_var.get()}")
         self._camera_loop()
 
     def _camera_loop(self) -> None:
         if not self.camera_running or self.camera is None:
             return
         try:
-            started = time.monotonic()
+            now = time.monotonic()
+            infer_started = now
             frame = self.camera.read()
             detections = self.detector.predict(frame) if self.detector else []
+            infer_ms = (time.monotonic() - infer_started) * 1000.0
             frame = draw_detections(frame, detections, self.detector.names if self.detector else {})
-            infer_ms = (time.monotonic() - started) * 1000.0
-            cv2.putText(frame, f"{infer_ms:.0f}ms  {len(detections)} det", (10, 24),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+
+            elapsed = now - self._prev_frame_time
+            fps = 1.0 / elapsed if elapsed > 0 else 0.0
+            self._prev_frame_time = now
+            draw_hud(frame, fps, infer_ms, len(detections))
+
             self._show_frame(self.camera_view, frame)
+            self.status_var.set(
+                f"Camera dang chay | model={self.model_var.get()} | FPS={fps:.1f} | infer={infer_ms:.0f}ms | det={len(detections)}"
+            )
         except Exception as error:
             self.camera_status.configure(text=f"Loi: {error}")
             self._stop_camera()
@@ -466,44 +587,56 @@ class App(tk.Tk):
         for radio in self.camera_radios:
             radio.state(["!disabled"])
         self.camera_status.configure(text="Da dung.")
+        self.status_var.set("San sang.")
 
     @staticmethod
-    def _show_frame(label: ttk.Label, frame_bgr: np.ndarray) -> None:
+    def _show_frame(label: tk.Label, frame_bgr: np.ndarray) -> None:
         rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
         image = ImageTk.PhotoImage(Image.fromarray(rgb))
-        label.configure(image=image)
+        label.configure(image=image, text="")
         label.image = image  # keep a reference, tkinter drops it otherwise
 
-    # -- video test tab ----------------------------------------------------
+    # -- video test tab ------------------------------------------------------
 
     def _build_video_tab(self) -> None:
-        controls = ttk.Frame(self.video_tab)
-        controls.pack(fill="x", pady=4)
+        self.video_tab.columnconfigure(0, weight=1)
+        self.video_tab.rowconfigure(2, weight=1)
 
-        ttk.Button(controls, text="Mo video...", command=self._open_video).pack(side="left")
+        controls = ttk.LabelFrame(self.video_tab, text="Nguon video")
+        controls.grid(row=0, column=0, sticky="ew", pady=(PAD, 6))
+        controls.columnconfigure(1, weight=1)
+
+        ttk.Button(controls, text="Mo video...", style="Accent.TButton", command=self._open_video).grid(
+            row=0, column=0, padx=8, pady=8
+        )
         self.video_path_var = tk.StringVar(value="Chua chon video.")
-        ttk.Label(controls, textvariable=self.video_path_var).pack(side="left", padx=8)
-
-        self.run_video_btn = ttk.Button(controls, text="Chay xu ly", command=self._run_video, state="disabled")
-        self.run_video_btn.pack(side="left", padx=8)
+        ttk.Entry(controls, textvariable=self.video_path_var, state="readonly").grid(
+            row=0, column=1, sticky="ew", padx=8, pady=8
+        )
+        self.run_video_btn = ttk.Button(
+            controls, text="Chay xu ly", style="Start.TButton", command=self._run_video, state="disabled"
+        )
+        self.run_video_btn.grid(row=0, column=2, padx=8, pady=8)
 
         self.video_progress = ttk.Progressbar(self.video_tab, mode="determinate")
-        self.video_progress.pack(fill="x", pady=6)
+        self.video_progress.grid(row=1, column=0, sticky="ew", pady=(0, 6))
 
-        self.video_preview = ttk.Label(self.video_tab)
-        self.video_preview.pack(fill="both", expand=True, pady=4)
+        preview_holder = tk.Frame(self.video_tab, bg="#0b0f16")
+        preview_holder.grid(row=2, column=0, sticky="nsew", pady=(0, 6))
+        self.video_preview = tk.Label(preview_holder, bg="#0b0f16", text="Chua xu ly video", fg=COLOR_MUTED)
+        self.video_preview.pack(expand=True)
 
-        result_frame = ttk.Frame(self.video_tab)
-        result_frame.pack(fill="x", pady=4)
-        ttk.Label(result_frame, text="Ket qua:").pack(side="left")
+        result_frame = ttk.LabelFrame(self.video_tab, text="Ket qua")
+        result_frame.grid(row=3, column=0, sticky="ew")
+        result_frame.columnconfigure(1, weight=1)
+        ttk.Label(result_frame, text="File output:").grid(row=0, column=0, padx=8, pady=8, sticky="w")
         self.result_path_var = tk.StringVar(value="(chua co)")
-        ttk.Entry(result_frame, textvariable=self.result_path_var, state="readonly", width=70).pack(
-            side="left", padx=6, fill="x", expand=True
+        ttk.Entry(result_frame, textvariable=self.result_path_var, state="readonly").grid(
+            row=0, column=1, sticky="ew", padx=8, pady=8
         )
-        ttk.Button(result_frame, text="Mo thu muc", command=self._open_result_folder).pack(side="left")
-
-        self._video_path: Path | None = None
-        self._result_path: Path | None = None
+        ttk.Button(result_frame, text="Mo thu muc", command=self._open_result_folder).grid(
+            row=0, column=2, padx=8, pady=8
+        )
 
     def _open_video(self) -> None:
         path = filedialog.askopenfilename(
@@ -528,6 +661,7 @@ class App(tk.Tk):
         self.run_video_btn.state(["disabled"])
         self.video_progress["value"] = 0
         self.result_path_var.set("(dang xu ly...)")
+        self.status_var.set(f"Dang xu ly video: {self._video_path.name}")
 
         thread = threading.Thread(target=self._video_worker, args=(detector, self._video_path), daemon=True)
         thread.start()
@@ -550,13 +684,23 @@ class App(tk.Tk):
         writer = cv2.VideoWriter(str(output_path), cv2.VideoWriter_fourcc(*"XVID"), fps, (width, height))
 
         processed = 0
+        prev_time = time.monotonic()
         try:
             while True:
                 ok, frame = capture.read()
                 if not ok:
                     break
+                started = time.monotonic()
                 detections = detector.predict(frame)
+                infer_ms = (time.monotonic() - started) * 1000.0
                 frame = draw_detections(frame, detections, detector.names)
+
+                now = time.monotonic()
+                elapsed = now - prev_time
+                prev_time = now
+                processing_fps = 1.0 / elapsed if elapsed > 0 else 0.0
+                draw_hud(frame, processing_fps, infer_ms, len(detections))
+
                 writer.write(frame)
                 processed += 1
                 if processed % 5 == 0 or processed == total_frames:
@@ -577,16 +721,19 @@ class App(tk.Tk):
                     _, progress, frame = message
                     self.video_progress["value"] = progress * 100
                     self._show_frame(self.video_preview, frame)
+                    self.status_var.set(f"Dang xu ly video: {progress * 100:.0f}%")
                 elif kind == "done":
                     self._result_path = message[1]
                     self.video_progress["value"] = 100
                     self.result_path_var.set(str(self._result_path))
                     self.run_video_btn.state(["!disabled"])
+                    self.status_var.set(f"Da xong: {self._result_path}")
                     return
                 elif kind == "error":
                     messagebox.showerror("Drowning Detection", message[1])
                     self.result_path_var.set("(loi)")
                     self.run_video_btn.state(["!disabled"])
+                    self.status_var.set("San sang.")
                     return
         except queue.Empty:
             pass
