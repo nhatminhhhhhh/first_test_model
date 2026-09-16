@@ -22,7 +22,6 @@ from tkinter import filedialog, messagebox, ttk
 import cv2
 import ncnn
 import numpy as np
-from PIL import Image, ImageTk
 
 try:
     from picamera2 import Picamera2
@@ -591,8 +590,12 @@ class App(tk.Tk):
 
     @staticmethod
     def _show_frame(label: tk.Label, frame_bgr: np.ndarray) -> None:
+        """Render a BGR frame via tkinter's native PPM support (no Pillow/Tk-image dependency)."""
         rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-        image = ImageTk.PhotoImage(Image.fromarray(rgb))
+        ok, encoded = cv2.imencode(".ppm", rgb)
+        if not ok:
+            return
+        image = tk.PhotoImage(data=encoded.tobytes())
         label.configure(image=image, text="")
         label.image = image  # keep a reference, tkinter drops it otherwise
 
