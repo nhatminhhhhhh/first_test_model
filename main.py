@@ -26,8 +26,13 @@ except ImportError as error:
 
 
 REPO_DIR = Path(__file__).resolve().parent
-CONFIRMATION_WINDOW_SECONDS = 2.0
-MATCH_IOU_THRESHOLD = 0.5
+BOX_COLORS = [
+    (0, 0, 255),
+    (0, 255, 0),
+    (255, 128, 0),
+    (255, 0, 255),
+    (0, 255, 255),
+]
 NCNN_MEAN = [0.0, 0.0, 0.0]
 NCNN_NORM = [1 / 255.0, 1 / 255.0, 1 / 255.0]
 THERMAL_PATH = Path("/sys/class/thermal/thermal_zone0/temp")
@@ -144,19 +149,6 @@ def load_export_imgsz(model_dir: Path, fallback: int) -> int:
                 return int(stripped)
             break
     return fallback
-
-
-def box_iou(first: np.ndarray, second: np.ndarray) -> float:
-    """Return the intersection-over-union of two xyxy boxes."""
-    x1 = max(first[0], second[0])
-    y1 = max(first[1], second[1])
-    x2 = min(first[2], second[2])
-    y2 = min(first[3], second[3])
-    intersection = max(0.0, x2 - x1) * max(0.0, y2 - y1)
-    first_area = max(0.0, first[2] - first[0]) * max(0.0, first[3] - first[1])
-    second_area = max(0.0, second[2] - second[0]) * max(0.0, second[3] - second[1])
-    union = first_area + second_area - intersection
-    return intersection / union if union else 0.0
 
 
 def letterbox(image: np.ndarray, imgsz: int) -> tuple[np.ndarray, float, tuple[int, int]]:
@@ -310,42 +302,11 @@ def draw_detections(
     frame: np.ndarray,
     detections: list[tuple[np.ndarray, float, int]],
     names: dict[int, str],
-    confirmation_boxes: list[dict[str, object]],
-    timestamp: float,
 ) -> np.ndarray:
-    """Draw detections and update the two-second drowning confirmations."""
-    confirmation_boxes[:] = [
-        item
-        for item in confirmation_boxes
-        if timestamp - float(item["started_at"]) <= CONFIRMATION_WINDOW_SECONDS
-    ]
-
+    """Draw each detection's box, class label, and confidence."""
     for box, confidence, class_id in detections:
         label_name = str(names[class_id])
-        is_drowning = label_name.lower() == "drowning"
-        confirmed = False
-        if is_drowning:
-            for item in confirmation_boxes:
-                if (
-                    confidence > 0.6
-                    and box_iou(box, item["box"]) >= MATCH_IOU_THRESHOLD
-                ):
-                    item["box"] = box
-                    item["confirmed"] = True
-                    confirmed = True
-                    break
-            if confidence > 0.6 and not confirmed:
-                confirmation_boxes.append(
-                    {"box": box, "started_at": timestamp, "confirmed": False}
-                )
-
-        color = (
-            (0, 0, 255)
-            if confirmed
-            else (0, 255, 255)
-            if is_drowning
-            else (0, 255, 0)
-        )
+        color = BOX_COLORS[class_id % len(BOX_COLORS)]
         points = box.astype(int)
         cv2.rectangle(frame, tuple(points[:2]), tuple(points[2:]), color, 2)
         cv2.putText(
@@ -364,14 +325,14 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--model",
-        default="model_ncnn_model",
+        default="model/yolo26n_drowning-2",
         help="NCNN model directory exported by Ultralytics",
     )
-    parser.add_argument("--conf", type=float, default=0.2)
+    parser.add_argument("--conf", type=float, default=0.25)
     parser.add_argument("--iou", type=float, default=0.45)
     parser.add_argument("--imgsz", type=int, default=0, help="0 = use export size from metadata.yaml")
-    parser.add_argument("--width", type=int, default=640)
-    parser.add_argument("--height", type=int, default=480)
+    parser.add_argument("--width", type=int, default=320)
+    parser.add_argument("--height", type=int, default=240)
     parser.add_argument("--fps", type=float, default=15)
     parser.add_argument(
         "--threads",
@@ -459,7 +420,6 @@ def main() -> None:
     for _ in range(max(0, args.warmup)):
         detector.predict(dummy)
 
-    confirmation_boxes: list[dict[str, object]] = []
     previous_time = time.monotonic()
     infer_total_ms = 0.0
     frame_count = 0
@@ -477,17 +437,10 @@ def main() -> None:
             infer_started = time.monotonic()
             detections = detector.predict(image)
             infer_ms = (time.monotonic() - infer_started) * 1000.0
-            timestamp = time.monotonic()
             if args.no_display and writer is None:
                 frame = image
             else:
-                frame = draw_detections(
-                    image,
-                    detections,
-                    detector.names,
-                    confirmation_boxes,
-                    timestamp,
-                )
+                frame = draw_detections(image, detections, detector.names)
             current_time = time.monotonic()
             elapsed = current_time - previous_time
             previous_time = current_time

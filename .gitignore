@@ -13,7 +13,16 @@ dataset/
 # Video files
 *.mp4
 *.avi
+
 scripts/
 runs/compare/
 runs/test_current/
 dataset_extra/
+yolo26n.pt
+yolov8n.pt
+model.pt
+model_ncnn_model/
+model_ncnn_fp32_416/
+runs/train/yolov8n_drowning/
+runs/train/yolo26n_drowning/
+detect.py

@@ -1,0 +1,22 @@
+description: Ultralytics best model trained on /content/dataset/data.yaml
+author: Ultralytics
+date: '2026-09-16T10:06:18.450818+07:00'
+version: 8.4.142
+license: AGPL-3.0 License (https://ultralytics.com/license)
+docs: https://docs.ultralytics.com
+stride: 32
+task: detect
+head: Detect
+batch: 1
+imgsz:
+- 320
+- 320
+names:
+  0: Drowning
+  1: Person out of water
+  2: Swimming
+args:
+  batch: 1
+  quantize: null
+channels: 3
+end2end: false
